@@ -20,6 +20,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 import javax.net.ssl.HostnameVerifier;
+import javax.net.ssl.HttpsURLConnection;
 import javax.net.ssl.SNIHostName;
 import javax.net.ssl.SNIServerName;
 import javax.net.ssl.SSLParameters;
@@ -129,23 +130,24 @@ public class SSLNetworkModule extends TCPNetworkModule {
 		// RTC 765: Set a timeout to avoid the SSL handshake being blocked indefinitely
 		socket.setSoTimeout(this.handshakeTimeoutSecs * 1000);
 
-		// SNI support.  Should be automatic under some circumstances - not all, apparently
-		SSLParameters sslParameters = ((SSLSocket)socket).getSSLParameters();
-		List<SNIServerName> sniHostNames = new ArrayList<SNIServerName>(1);
-		sniHostNames.add(new SNIHostName(host));
-		sslParameters.setServerNames(sniHostNames);
-
-		// If default Hostname verification is enabled, use the same method that is used with HTTPS
-		if (this.httpsHostnameVerificationEnabled) {
-			sslParameters.setEndpointIdentificationAlgorithm("HTTPS");
+		// AVN: javax.net.ssl.SNIHostName and SSLParameters.setEndpointIdentificationAlgorithm
+		// only exist from Java 8 / Android 7.0 (API 24). On older Android (CVR155, API 22) set
+		// the SNI host name through the platform socket's own setter and check the host name
+		// after the handshake instead.
+		HostnameVerifier verifier = hostnameVerifier;
+		if (SNI_API_AVAILABLE) {
+			ModernTls.configure((SSLSocket) socket, host, this.httpsHostnameVerificationEnabled);
+		} else {
+			setLegacySniHostname((SSLSocket) socket, host);
+			if (this.httpsHostnameVerificationEnabled && verifier == null) {
+				verifier = HttpsURLConnection.getDefaultHostnameVerifier();
+			}
 		}
 
-		((SSLSocket) socket).setSSLParameters(sslParameters);
-
 		((SSLSocket) socket).startHandshake();
-		if (hostnameVerifier != null) {
+		if (verifier != null) {
 			SSLSession session = ((SSLSocket) socket).getSession();
-			if(!hostnameVerifier.verify(host, session)) {
+			if(!verifier.verify(host, session)) {
 				session.invalidate();
 				socket.close();
 				throw new SSLPeerUnverifiedException("Host: " + host + ", Peer Host: " + session.getPeerHost());
@@ -157,5 +159,49 @@ public class SSLNetworkModule extends TCPNetworkModule {
 
 	public String getServerURI() {
 		return "ssl://" + host + ":" + port;
+	}
+
+	private static final boolean SNI_API_AVAILABLE = isSniApiAvailable();
+
+	private static boolean isSniApiAvailable() {
+		try {
+			Class.forName("javax.net.ssl.SNIHostName");
+			SSLParameters.class.getMethod("setEndpointIdentificationAlgorithm", String.class);
+			return true;
+		} catch (Throwable t) {
+			return false;
+		}
+	}
+
+	/**
+	 * Android's TLS sockets before API 24 take the SNI host name through a
+	 * {@code setHostname(String)} method on the implementation class. A socket made with
+	 * the no-argument {@code createSocket()} has no host name, so without this no SNI is
+	 * sent. Best effort: other platforms don't have the method.
+	 */
+	private static void setLegacySniHostname(SSLSocket socket, String host) {
+		try {
+			socket.getClass().getMethod("setHostname", String.class).invoke(socket, host);
+		} catch (Throwable t) {
+			// No setter on this platform; the handshake goes ahead without SNI
+		}
+	}
+
+	/** Kept in its own class so that nothing here is loaded where the Java 8 TLS API is missing. */
+	private static final class ModernTls {
+		static void configure(SSLSocket socket, String host, boolean httpsHostnameVerification) {
+			// SNI support.  Should be automatic under some circumstances - not all, apparently
+			SSLParameters sslParameters = socket.getSSLParameters();
+			List<SNIServerName> sniHostNames = new ArrayList<SNIServerName>(1);
+			sniHostNames.add(new SNIHostName(host));
+			sslParameters.setServerNames(sniHostNames);
+
+			// If default Hostname verification is enabled, use the same method that is used with HTTPS
+			if (httpsHostnameVerification) {
+				sslParameters.setEndpointIdentificationAlgorithm("HTTPS");
+			}
+
+			socket.setSSLParameters(sslParameters);
+		}
 	}
 }

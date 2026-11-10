@@ -111,9 +111,10 @@ public class WebSocketHandshake {
 			pw.print("Sec-WebSocket-Version: 13" + LINE_SEPARATOR);
 
 			if (customWebSocketHeaders != null) {
-				customWebSocketHeaders.entrySet().forEach(entry ->
-					pw.print(entry.getKey() + ": " + entry.getValue() + LINE_SEPARATOR)
-				);
+				// AVN: a plain loop; Iterable.forEach needs Android 7.0 (API 24)
+				for (Map.Entry<String, String> entry : customWebSocketHeaders.entrySet()) {
+					pw.print(entry.getKey() + ": " + entry.getValue() + LINE_SEPARATOR);
+				}
 			}
 
 			String userInfo = srvUri.getUserInfo();
