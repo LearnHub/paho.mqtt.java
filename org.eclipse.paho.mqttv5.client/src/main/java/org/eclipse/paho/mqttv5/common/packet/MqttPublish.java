@@ -46,6 +46,9 @@ public class MqttPublish extends MqttPersistableWireMessage {
 	private boolean retained = false;
 	private boolean dup = false;
 	private String topicName;
+	// AVN: true while the packet goes out with its Topic Alias in place of the Topic Name.
+	// The name itself is kept, so the packet can be sent in full on a later connection.
+	private boolean topicNameOmitted = false;
 
 	/**
 	 * Constructs a new MqttPublish message
@@ -117,7 +120,7 @@ public class MqttPublish extends MqttPersistableWireMessage {
 			DataOutputStream dos = new DataOutputStream(baos);
 
 			// If we are using a Topic Alias, then the topic should be empty
-			if (topicName != null) {
+			if (topicName != null && !topicNameOmitted) {
 				MqttDataTypes.encodeUTF8(dos, topicName);
 			} else {
 				MqttDataTypes.encodeUTF8(dos, "");
@@ -191,6 +194,26 @@ public class MqttPublish extends MqttPersistableWireMessage {
 
 	public void setTopicName(String topicName) {
 		this.topicName = topicName;
+	}
+
+	/**
+	 * @return true if the packet is encoded with an empty Topic Name because its Topic
+	 *         Alias stands for it.
+	 */
+	public boolean isTopicNameOmitted() {
+		return topicNameOmitted;
+	}
+
+	/**
+	 * Chooses whether the packet is encoded with an empty Topic Name, relying on its
+	 * Topic Alias. {@link #getTopicName()} is unaffected. Only valid on the Network
+	 * Connection that defined the alias.
+	 *
+	 * @param topicNameOmitted
+	 *            true to leave the Topic Name out of the encoded packet.
+	 */
+	public void setTopicNameOmitted(boolean topicNameOmitted) {
+		this.topicNameOmitted = topicNameOmitted;
 	}
 
 	@Override

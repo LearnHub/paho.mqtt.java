@@ -233,7 +233,7 @@ public class ClientState implements MqttState {
 		log.fine(CLASS_NAME, methodName, "665");
 		outgoingTopicAliases.clear();
 		incomingTopicAliases.clear();
-
+		removeTopicAliasesFromInflightMessages();
 	}
 
 	private MqttWireMessage restoreMessage(String key, MqttPersistable persistable) throws MqttException {
@@ -496,6 +496,61 @@ public class ClientState implements MqttState {
 		this.pendingMessages = reOrder(pendingMessages);
 	}
 
+	/**
+	 * Gives an outgoing publish a Topic Alias when the server accepts them: the first
+	 * publish to a topic defines the alias and later ones go out with the alias alone.
+	 * The Topic Name stays on the message (see {@link MqttPublish#setTopicNameOmitted}),
+	 * because an alias only lasts for the Network Connection that defined it.
+	 */
+	private void applyOutgoingTopicAlias(MqttPublish publish) {
+		String topic = publish.getTopicName();
+		if (topic == null || this.mqttConnection == null || this.mqttConnection.getOutgoingTopicAliasMaximum() <= 0) {
+			return;
+		}
+		if (outgoingTopicAliases.containsKey(topic)) {
+			// Existing Topic Alias, Assign it and leave the topic string out of the packet
+			publish.getProperties().setTopicAlias(outgoingTopicAliases.get(topic));
+			publish.setTopicNameOmitted(true);
+		} else {
+			int nextOutgoingTopicAlias = this.mqttConnection.getNextOutgoingTopicAlias();
+			if (nextOutgoingTopicAlias <= this.mqttConnection.getOutgoingTopicAliasMaximum()) {
+				// Create a new Topic Alias and increment the counter
+				publish.getProperties().setTopicAlias(nextOutgoingTopicAlias);
+				outgoingTopicAliases.put(topic, nextOutgoingTopicAlias);
+			}
+		}
+	}
+
+	/**
+	 * Takes the Topic Alias off every publish that is still waiting for its
+	 * acknowledgement, so that each is re-sent on the next connection with its Topic
+	 * Name and no alias. Without this a publish that went out with the alias alone is
+	 * re-sent naming an alias the new connection has never defined, which the server
+	 * must treat as a protocol error, and since the publish is still unacknowledged it
+	 * is re-sent on every reconnect. Aliases are not re-applied to these messages: one
+	 * re-sent out of order could redefine an alias that newer publishes already use.
+	 */
+	private void removeTopicAliasesFromInflightMessages() {
+		removeTopicAliases(outboundQoS2);
+		removeTopicAliases(outboundQoS1);
+		removeTopicAliases(outboundQoS0);
+	}
+
+	private static void removeTopicAliases(java.util.Map<Integer, MqttWireMessage> messages) {
+		if (messages == null) {
+			return;
+		}
+		for (MqttWireMessage message : messages.values()) {
+			if (message instanceof MqttPublish) {
+				MqttPublish publish = (MqttPublish) message;
+				publish.setTopicNameOmitted(false);
+				if (publish.getProperties() != null) {
+					publish.getProperties().setTopicAlias(null);
+				}
+			}
+		}
+	}
+
 	/*
 	 * (non-Javadoc)
 	 * 
@@ -510,24 +565,6 @@ public class ClientState implements MqttState {
 		if (message.isMessageIdRequired() && (message.getMessageId() == 0)) {
 			message.setMessageId(getNextMessageId());
 		}
-		// Set Topic Alias if required
-		if (message instanceof MqttPublish && ((MqttPublish) message).getTopicName() != null 
-	        		&& this.mqttConnection != null && this.mqttConnection.getOutgoingTopicAliasMaximum() > 0) {
-                        String topic = ((MqttPublish) message).getTopicName();
-			if (outgoingTopicAliases.containsKey(topic)) {
-				// Existing Topic Alias, Assign it and remove the topic string
-				((MqttPublish) message).getProperties().setTopicAlias(outgoingTopicAliases.get(topic));
-				((MqttPublish) message).setTopicName(null);
-			} else {
-				int nextOutgoingTopicAlias = this.mqttConnection.getNextOutgoingTopicAlias();
-				if (nextOutgoingTopicAlias <= this.mqttConnection.getOutgoingTopicAliasMaximum()) {
-					// Create a new Topic Alias and increment the counter
-					((MqttPublish) message).getProperties().setTopicAlias(nextOutgoingTopicAlias);
-					outgoingTopicAliases.put(((MqttPublish) message).getTopicName(), nextOutgoingTopicAlias);
-				}
-			}
-		}
-
 		if (token != null) {
 			try {
 				token.internalTok.setMessageID(message.getMessageId());
@@ -559,6 +596,9 @@ public class ClientState implements MqttState {
 					persistence.put(getSendPersistenceKey(message), (MqttPublish) message);
 					break;
 				}
+				// AVN: the Topic Alias is applied only now, after the message has been
+				// persisted, so that the persisted copy always carries its Topic Name
+				applyOutgoingTopicAlias((MqttPublish) message);
 				tokenStore.saveToken(token, message);
 				pendingMessages.addElement(message);
 				queueLock.notifyAll();
